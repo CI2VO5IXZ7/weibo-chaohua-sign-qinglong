@@ -1,6 +1,8 @@
 import io
+import sys
 import unittest
 from contextlib import redirect_stdout
+from types import ModuleType
 from urllib.parse import quote
 from unittest.mock import patch
 
@@ -154,6 +156,40 @@ class ScriptTests(unittest.TestCase):
         self.assertNotIn("TEST_GSID_VALUE", calls[0][1])
         self.assertNotIn("Traceback", output)
 
+    def test_raw_secret_is_registered_before_account_parsing(self):
+        raw = "BARE_RAW_SECRET"
+        with patch.object(
+                script, "parse_account",
+                side_effect=script.TaskError("无效凭据 " + raw)):
+            code, calls, output, unused = self.run_main([], raw=raw)
+
+        self.assertEqual(1, code)
+        self.assertNotIn(raw, output)
+        self.assertNotIn(raw, calls[0][1])
+
+    def test_load_notifier_prefers_notify_send(self):
+        preferred = lambda title, body: None
+        fallback = lambda title, body: None
+        notify = ModuleType("notify")
+        notify.send = preferred
+        send_notify = ModuleType("sendNotify")
+        send_notify.send = fallback
+
+        with patch.dict(sys.modules, {"notify": notify, "sendNotify": send_notify}):
+            self.assertIs(preferred, script.load_notifier())
+
+    def test_load_notifier_falls_back_to_send_notify_send(self):
+        fallback = lambda title, body: None
+        send_notify = ModuleType("sendNotify")
+        send_notify.send = fallback
+
+        with patch.dict(sys.modules, {"notify": None, "sendNotify": send_notify}):
+            self.assertIs(fallback, script.load_notifier())
+
+    def test_load_notifier_returns_none_when_modules_are_unavailable(self):
+        with patch.dict(sys.modules, {"notify": None, "sendNotify": None}):
+            self.assertIsNone(script.load_notifier())
+
     def test_notifier_unavailable_does_not_change_success_status(self):
         response = FakeResponse({"items": [topic("已签超话", "done", done=True)]})
         output = io.StringIO()
@@ -179,6 +215,18 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertIn("[通知警告] 通知发送失败", output)
         self.assertNotIn(RAW, output)
+
+    def test_bare_credential_in_title_is_hidden_from_console_and_notification(self):
+        response = FakeResponse({
+            "items": [topic("敏感测试 TEST_GSID_VALUE", "bare-secret", done=True)],
+        })
+        code, calls, output, unused = self.run_main([response])
+
+        self.assertEqual(0, code)
+        self.assertNotIn("TEST_GSID_VALUE", output)
+        self.assertNotIn("TEST_GSID_VALUE", calls[0][1])
+        self.assertIn("[已隐藏]", output)
+        self.assertIn("[已隐藏]", calls[0][1])
 
     def test_notification_and_console_do_not_leak_secrets(self):
         title = (

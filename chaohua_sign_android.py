@@ -130,7 +130,7 @@ def new_progress():
     }
 
 
-def run_account(base, session, pause=time.sleep, progress=None):
+def run_account(base, session, pause=time.sleep, progress=None, secrets=()):
     progress = progress if progress is not None else new_progress()
     totals = progress["totals"]
     body = {k: base.get(k, v) for k, v in BODY_DEFAULTS.items()}
@@ -177,7 +177,8 @@ def run_account(base, session, pause=time.sleep, progress=None):
                 pause(random.uniform(5, 10))
             totals[state] += 1
             progress["results"].append((state, topic["title"]))
-            print("[{}] {}".format(state, sanitize_text(topic["title"])), flush=True)
+            print("[{}] {}".format(
+                state, sanitize_text(topic["title"], secrets)), flush=True)
         upcoming = next_cursor(data)
         if not upcoming:
             break
@@ -244,17 +245,18 @@ def main(raw=None, session_factory=requests.Session, pause=time.sleep,
          notifier=_AUTO_NOTIFIER):
     raw = os.getenv("status_taobudiao", "") if raw is None else raw
     progress = new_progress()
-    secrets = []
+    secrets = [raw] if raw else []
     exit_code = 1
     final_message = "执行失败。"
     try:
         if not raw.strip():
             raise TaskError("请在青龙添加并启用环境变量 status_taobudiao。")
         base = parse_account(raw)
-        secrets = [raw] + [base.get(key, "") for key in ("gsid", "s", "aid")]
+        secrets.extend(base.get(key, "") for key in ("gsid", "s", "aid"))
         with session_factory() as session:
             session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
-            exit_code = run_account(base, session, pause=pause, progress=progress)
+            exit_code = run_account(
+                base, session, pause=pause, progress=progress, secrets=secrets)
         final_message = "执行完成。" if exit_code == 0 else "执行完成，但存在失败或跳过项。"
     except TaskError as exc:
         final_message = "错误：" + str(exc)
