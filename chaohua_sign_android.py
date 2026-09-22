@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""安卓微博超话签到，按用户提供的 2026-09-22 HAR 结构适配。
+"""安卓微博超话签到青龙脚本。
 
-青龙依赖：requests
+青龙依赖：requests、青龙内置 notify.py（通知可选）
 环境变量：status_taobudiao = 完整 container_timeline_topicsub 请求 URL
 运行命令：task chaohua_sign_android.py
-仅离线验证过请求构造与响应解析，实际签到需在青龙首次手动测试。
 仅执行超话签到，不包含发微博功能。不会输出登录参数或完整 URL。
 """
 
 import os
 import random
+import re
 import sys
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -22,6 +22,7 @@ LIST_PATH = "/2/statuses/container_timeline_topicsub"
 SIGN_PATH = "/2/page/button"
 USER_AGENT = "GM1910_12_weibo_16.8.2_android"
 MAX_PAGES = 50
+NOTIFICATION_TITLE = "微博超话签到"
 BODY_DEFAULTS = {
     "sg_home_check_null": "1", "hasContent": "false",
     "flowId": "232478_-_mine_topic", "taskType": "refresh",
@@ -33,6 +34,7 @@ BODY_DEFAULTS = {
     "flowVersion": "0.0.1", "redpacket_fly": "1", "sg_tab_config": "2",
     "invokeType": "init",
 }
+_AUTO_NOTIFIER = object()
 
 
 class TaskError(Exception):
@@ -43,7 +45,7 @@ def parse_account(raw):
     url = urlsplit(raw.strip())
     if (url.scheme != "https" or url.netloc != "api.weibo.cn"
             or url.path != LIST_PATH):
-        raise TaskError("环境变量应为 https://api.weibo.cn" + LIST_PATH + " 的完整请求链接。")
+        raise TaskError("环境变量应为微博超话列表接口的完整 HTTPS 请求链接。")
     params = {k: v[0] for k, v in parse_qs(url.query).items()}
     missing = [k for k in ("aid", "c", "from", "gsid", "s") if not params.get(k)]
     if missing:
@@ -121,10 +123,18 @@ def next_cursor(data):
             if k in params and params[k] is not None}
 
 
-def run_account(base, session, pause=time.sleep):
+def new_progress():
+    return {
+        "results": [],
+        "totals": {"成功": 0, "已签": 0, "失败": 0, "跳过": 0},
+    }
+
+
+def run_account(base, session, pause=time.sleep, progress=None):
+    progress = progress if progress is not None else new_progress()
+    totals = progress["totals"]
     body = {k: base.get(k, v) for k, v in BODY_DEFAULTS.items()}
     cursor, seen_cursors, seen_topics = {}, set(), set()
-    totals = {"成功": 0, "已签": 0, "失败": 0, "跳过": 0}
     for page in range(1, MAX_PAGES + 1):
         query = dict(base)
         form = dict(body)
@@ -150,8 +160,6 @@ def run_account(base, session, pause=time.sleep):
             raise TaskError("分页返回重复内容，已停止；尚不能确认全部超话处理完成。")
         print("[列表] 第 {} 页，识别到 {} 个超话".format(page, len(topics)))
         for topic in fresh:
-            if topic["key"] in seen_topics:
-                continue
             seen_topics.add(topic["key"])
             if topic["done"]:
                 state = "已签"
@@ -168,7 +176,8 @@ def run_account(base, session, pause=time.sleep):
                 state = "成功" if str(result.get("result")) == "1" else "失败"
                 pause(random.uniform(5, 10))
             totals[state] += 1
-            print("[{}] {}".format(state, topic["title"]), flush=True)
+            progress["results"].append((state, topic["title"]))
+            print("[{}] {}".format(state, sanitize_text(topic["title"])), flush=True)
         upcoming = next_cursor(data)
         if not upcoming:
             break
@@ -183,23 +192,80 @@ def run_account(base, session, pause=time.sleep):
     return 1 if totals["失败"] or totals["跳过"] else 0
 
 
-def main():
-    raw = os.getenv("status_taobudiao", "")
-    if not raw.strip():
-        print("[错误] 请在青龙添加并启用环境变量 status_taobudiao，值为完整列表请求 URL。")
-        return 1
+def sanitize_text(value, secrets=()):
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"https?://\S+", "[已隐藏链接]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)\b(?:gsid|aid|s|token|cookie|authorization)\b\s*[:=]\s*[^\s,;]+",
+        "[已隐藏参数]", text)
+    for secret in sorted({str(item) for item in secrets if item}, key=len, reverse=True):
+        text = text.replace(secret, "[已隐藏]")
+    return text
+
+
+def notification_body(progress, final_message, secrets=()):
+    lines = ["执行结果："]
+    if progress["results"]:
+        lines.extend("- [{}] {}".format(state, sanitize_text(title, secrets))
+                     for state, title in progress["results"])
+    else:
+        lines.append("- 无超话处理结果")
+    totals = progress["totals"]
+    lines.append("汇总：" + "，".join("{} {}".format(k, totals[k]) for k in totals))
+    lines.append("状态：" + sanitize_text(final_message, secrets))
+    return "\n".join(lines)
+
+
+def load_notifier():
     try:
+        from notify import send
+        return send
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from sendNotify import send
+        return send
+    except (ImportError, AttributeError):
+        return None
+
+
+def send_notification(body, notifier=_AUTO_NOTIFIER):
+    try:
+        sender = load_notifier() if notifier is _AUTO_NOTIFIER else notifier
+        if sender is None:
+            print("[通知警告] 未找到可用的 notify.py 或 sendNotify.py，已跳过通知。")
+            return
+        sender(NOTIFICATION_TITLE, body)
+    except Exception:
+        print("[通知警告] 通知发送失败，请检查青龙通知配置。")
+
+
+def main(raw=None, session_factory=requests.Session, pause=time.sleep,
+         notifier=_AUTO_NOTIFIER):
+    raw = os.getenv("status_taobudiao", "") if raw is None else raw
+    progress = new_progress()
+    secrets = []
+    exit_code = 1
+    final_message = "执行失败。"
+    try:
+        if not raw.strip():
+            raise TaskError("请在青龙添加并启用环境变量 status_taobudiao。")
         base = parse_account(raw)
-        with requests.Session() as session:
+        secrets = [raw] + [base.get(key, "") for key in ("gsid", "s", "aid")]
+        with session_factory() as session:
             session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
-            return run_account(base, session)
+            exit_code = run_account(base, session, pause=pause, progress=progress)
+        final_message = "执行完成。" if exit_code == 0 else "执行完成，但存在失败或跳过项。"
     except TaskError as exc:
-        print("[错误] " + str(exc))
-        return 1
+        final_message = "错误：" + str(exc)
+        print("[错误] " + sanitize_text(exc, secrets))
     except Exception as exc:
+        final_message = "错误：未预期的接口结构或运行错误（{}）。".format(type(exc).__name__)
         # 不打印可能带有登录 URL 的异常详情或 traceback。
-        print("[错误] 未预期的接口结构或运行错误：" + type(exc).__name__)
-        return 1
+        print("[错误] " + final_message)
+    body = notification_body(progress, final_message, secrets)
+    send_notification(body, notifier)
+    return exit_code
 
 
 if __name__ == "__main__":

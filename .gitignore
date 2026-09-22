@@ -1,0 +1,44 @@
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and local configuration
+.env
+.env.*
+*.env
+*.local
+
+# Logs and runtime output
+*.log
+logs/
+*.out
+
+# Captures and credentials
+status_taobudiao.txt
+*.har
+*.har.gz
+*credential*
+*credentials*
+*cookie*
+*cookies*
+*secret*
+*secrets*
+*token*
+private/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
