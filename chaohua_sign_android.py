@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """安卓微博超话签到青龙脚本。
 
-青龙依赖：requests、青龙内置 notify.py（通知可选）
-环境变量：status_taobudiao = 完整 container_timeline_topicsub 请求 URL
+青龙依赖：requests、青龙内置 notify.py（通知可选，支持脚本位于订阅子目录）
+环境变量：status_bujiaban = 完整 container_timeline_topicsub 请求 URL
 运行命令：task chaohua_sign_android.py
 仅执行超话签到，不包含发微博功能。不会输出登录参数或完整 URL。
 """
@@ -34,7 +33,6 @@ BODY_DEFAULTS = {
     "flowVersion": "0.0.1", "redpacket_fly": "1", "sg_tab_config": "2",
     "invokeType": "init",
 }
-_AUTO_NOTIFIER = object()
 
 
 class TaskError(Exception):
@@ -130,8 +128,7 @@ def new_progress():
     }
 
 
-def run_account(base, session, pause=time.sleep, progress=None, secrets=()):
-    progress = progress if progress is not None else new_progress()
+def run_account(base, session, progress, secrets):
     totals = progress["totals"]
     body = {k: base.get(k, v) for k, v in BODY_DEFAULTS.items()}
     cursor, seen_cursors, seen_topics = {}, set(), set()
@@ -174,7 +171,7 @@ def run_account(base, session, pause=time.sleep, progress=None, secrets=()):
                 params["request_url"] = target
                 result = request_json(session, "GET", SIGN_PATH, params=params)
                 state = "成功" if str(result.get("result")) == "1" else "失败"
-                pause(random.uniform(5, 10))
+                time.sleep(random.uniform(5, 10))
             totals[state] += 1
             progress["results"].append((state, topic["title"]))
             print("[{}] {}".format(
@@ -188,7 +185,7 @@ def run_account(base, session, pause=time.sleep, progress=None, secrets=()):
         seen_cursors.add(signature)
         cursor = upcoming
     else:
-        raise TaskError("达到 50 页上限，未确认所有超话处理完成。")
+        raise TaskError("达到 {} 页上限，未确认所有超话处理完成。".format(MAX_PAGES))
     print("[汇总] " + "，".join("{} {}".format(k, v) for k, v in totals.items()))
     return 1 if totals["失败"] or totals["跳过"] else 0
 
@@ -217,46 +214,65 @@ def notification_body(progress, final_message, secrets=()):
     return "\n".join(lines)
 
 
+def notify_search_dirs():
+    """青龙不会把脚本目录加入 PYTHONPATH，订阅仓库运行在子目录时需手动定位 notify.py。"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    dirs = [script_dir, os.getcwd()]
+    parent = script_dir
+    for _ in range(3):
+        parent = os.path.dirname(parent)
+        dirs.append(parent)
+    for env in ("QL_DATA_DIR", "QL_DIR"):
+        root = os.getenv(env)
+        if root:
+            dirs.append(os.path.join(root, "scripts"))
+            dirs.append(os.path.join(root, "data", "scripts"))
+    dirs.extend(["/ql/data/scripts", "/ql/scripts"])
+    return list(dict.fromkeys(dirs))
+
+
 def load_notifier():
+    for directory in notify_search_dirs():
+        if os.path.isfile(os.path.join(directory, "notify.py")):
+            if directory not in sys.path:
+                sys.path.insert(0, directory)
+            print("[通知] 使用 notify.py：" + directory)
+            break
     try:
         from notify import send
-        return send
-    except (ImportError, AttributeError):
-        pass
-    try:
-        from sendNotify import send
-        return send
-    except (ImportError, AttributeError):
+    except Exception as exc:
+        print("[通知警告] 无法导入青龙 notify.py（{}），已搜索目录：{}".format(
+            type(exc).__name__, "、".join(notify_search_dirs())))
         return None
+    return send
 
 
-def send_notification(body, notifier=_AUTO_NOTIFIER):
+def send_notification(body):
     try:
-        sender = load_notifier() if notifier is _AUTO_NOTIFIER else notifier
+        sender = load_notifier()
         if sender is None:
-            print("[通知警告] 未找到可用的 notify.py 或 sendNotify.py，已跳过通知。")
             return
         sender(NOTIFICATION_TITLE, body)
-    except Exception:
-        print("[通知警告] 通知发送失败，请检查青龙通知配置。")
+        print("[通知] 已调用 notify.send，各渠道推送结果见上方 notify 输出。")
+    except Exception as exc:
+        print("[通知警告] 通知发送失败（{}），请检查青龙通知配置。".format(
+            type(exc).__name__))
 
 
-def main(raw=None, session_factory=requests.Session, pause=time.sleep,
-         notifier=_AUTO_NOTIFIER):
-    raw = os.getenv("status_taobudiao", "") if raw is None else raw
+def main():
+    raw = os.getenv("status_bujiaban", "")
     progress = new_progress()
     secrets = [raw] if raw else []
     exit_code = 1
     final_message = "执行失败。"
     try:
         if not raw.strip():
-            raise TaskError("请在青龙添加并启用环境变量 status_taobudiao。")
+            raise TaskError("请在青龙添加并启用环境变量 status_bujiaban。")
         base = parse_account(raw)
         secrets.extend(base.get(key, "") for key in ("gsid", "s", "aid"))
-        with session_factory() as session:
+        with requests.Session() as session:
             session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
-            exit_code = run_account(
-                base, session, pause=pause, progress=progress, secrets=secrets)
+            exit_code = run_account(base, session, progress, secrets)
         final_message = "执行完成。" if exit_code == 0 else "执行完成，但存在失败或跳过项。"
     except TaskError as exc:
         final_message = "错误：" + str(exc)
@@ -266,7 +282,7 @@ def main(raw=None, session_factory=requests.Session, pause=time.sleep,
         # 不打印可能带有登录 URL 的异常详情或 traceback。
         print("[错误] " + final_message)
     body = notification_body(progress, final_message, secrets)
-    send_notification(body, notifier)
+    send_notification(body)
     return exit_code
 
 
